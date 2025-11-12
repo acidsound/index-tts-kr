@@ -29,10 +29,11 @@ desktop.ini
 /checkpoints/*
 !/checkpoints/*.yaml
 /outputs/
-
-Agent_Instructions/
+*processed_data/
 DeepSpeed/
-prompts/
+*datasets/
+hf_cache/
 *_dataset/
-
+*trained_ckpts*
+prompts/
 *.whl

@@ -5,23 +5,44 @@ import atexit
 import itertools
 import json
 import logging
+<<<<<<< HEAD
 import multiprocessing as mp
 import os
+=======
+import math
+import multiprocessing as mp
+import os
+import random
+>>>>>>> myfork/training_v2
 import shutil
 import sys
 import threading
 import time
+<<<<<<< HEAD
+=======
+import gc
+>>>>>>> myfork/training_v2
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import warnings
 
+<<<<<<< HEAD
+=======
+import numpy as np
+import torch
+
+>>>>>>> myfork/training_v2
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
 import gradio as gr
 import pandas as pd
+<<<<<<< HEAD
+=======
+from omegaconf import OmegaConf
+>>>>>>> myfork/training_v2
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
@@ -42,8 +63,11 @@ if not os.path.exists(cmd_args.model_dir):
     sys.exit(1)
 
 required_files = [
+<<<<<<< HEAD
     "bpe.model",
     "gpt.pth",
+=======
+>>>>>>> myfork/training_v2
     "config.yaml",
     "s2mel.pth",
     "wav2vec2bert_stats.pt",
@@ -54,6 +78,15 @@ for file_name in required_files:
         print(f"Required file {file_path} does not exist. Please download it.")
         sys.exit(1)
 
+<<<<<<< HEAD
+=======
+try:
+    BASE_CFG = OmegaConf.load(os.path.join(cmd_args.model_dir, "config.yaml"))
+except Exception as exc:  # pragma: no cover - config must load
+    print(f"Failed to load config.yaml: {exc}")
+    sys.exit(1)
+
+>>>>>>> myfork/training_v2
 # Configure cache locations and disable DeepSpeed before importing heavy modules
 hf_cache_dir = os.path.join(cmd_args.model_dir, "hf_cache")
 torch_cache_dir = os.path.join(cmd_args.model_dir, "torch_cache")
@@ -117,6 +150,11 @@ parallel_worker_config = {
     "verbose": cmd_args.verbose,
     "hf_cache": hf_cache_dir,
     "torch_cache": torch_cache_dir,
+<<<<<<< HEAD
+=======
+    "gpt_path": None,
+    "bpe_path": None,
+>>>>>>> myfork/training_v2
 }
 
 
@@ -216,13 +254,78 @@ def _shutdown_worker_pool():
 
 atexit.register(_shutdown_worker_pool)
 
+<<<<<<< HEAD
 
 def build_primary_tts() -> IndexTTS2:
+=======
+_PRIMARY_TTS: Optional[IndexTTS2] = None
+_MODEL_SELECTION: Dict[str, Optional[str]] = {"gpt": None, "bpe": None}
+
+
+def _candidate_paths(base_dirs: List[Path], suffixes: List[str]) -> List[str]:
+    results: List[str] = []
+    seen: set[str] = set()
+    for base in base_dirs:
+        if not base or not base.exists():
+            continue
+        for suffix in suffixes:
+            for path in base.glob(f"*{suffix}"):
+                resolved = str(path.resolve())
+                if resolved not in seen:
+                    seen.add(resolved)
+                    results.append(resolved)
+    results.sort()
+    return results
+
+
+def _is_gpt_checkpoint(path: Path) -> bool:
+    name = path.name.lower()
+    if not name.endswith(".pth"):
+        return False
+    excluded = ("s2mel", "campplus", "bigvgan", "wav2vec", "emo", "spk", "cfm")
+    return not any(token in name for token in excluded)
+
+
+def _discover_gpt_checkpoints() -> List[str]:
+    bases = [
+        Path(cmd_args.model_dir),
+        Path(current_dir) / "models",
+    ]
+    candidates = _candidate_paths(bases, [".pth"])
+    return [path for path in candidates if _is_gpt_checkpoint(Path(path))]
+
+
+def _discover_bpe_models() -> List[str]:
+    bases = [
+        Path(cmd_args.model_dir),
+        Path(current_dir) / "tokenizers",
+    ]
+    return _candidate_paths(bases, [".model"])
+
+
+def dispose_primary_tts():
+    global _PRIMARY_TTS
+    if _PRIMARY_TTS is not None:
+        try:
+            if hasattr(_PRIMARY_TTS, "gr_progress"):
+                _PRIMARY_TTS.gr_progress = None
+        finally:
+            _PRIMARY_TTS = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+
+def build_primary_tts() -> IndexTTS2:
+    if _MODEL_SELECTION["gpt"] is None or _MODEL_SELECTION["bpe"] is None:
+        raise RuntimeError("Model selection is not set. Provide GPT and BPE paths before loading.")
+>>>>>>> myfork/training_v2
     return IndexTTS2(
         model_dir=cmd_args.model_dir,
         cfg_path=os.path.join(cmd_args.model_dir, "config.yaml"),
         is_fp16=cmd_args.is_fp16,
         use_cuda_kernel=False,
+<<<<<<< HEAD
     )
 
 
@@ -234,6 +337,98 @@ def ensure_primary_tts() -> IndexTTS2:
 
 
 _PRIMARY_TTS: Optional[IndexTTS2] = None
+=======
+        use_accel=True,
+        gpt_checkpoint_path=_MODEL_SELECTION["gpt"],
+        bpe_model_path=_MODEL_SELECTION["bpe"],
+    )
+
+
+def load_primary_tts(gpt_path: str, bpe_path: str) -> IndexTTS2:
+    dispose_primary_tts()
+    resolved_gpt = os.path.abspath(gpt_path)
+    resolved_bpe = os.path.abspath(bpe_path)
+    previous_selection = _MODEL_SELECTION.copy()
+    _MODEL_SELECTION["gpt"] = resolved_gpt
+    _MODEL_SELECTION["bpe"] = resolved_bpe
+    try:
+        tts = build_primary_tts()
+    except Exception:
+        _MODEL_SELECTION.update(previous_selection)
+        dispose_primary_tts()
+        raise
+    global _PRIMARY_TTS
+    _PRIMARY_TTS = tts
+    parallel_worker_config["gpt_path"] = resolved_gpt
+    parallel_worker_config["bpe_path"] = resolved_bpe
+    worker_pool.stop()
+    return tts
+
+
+def ensure_primary_tts() -> IndexTTS2:
+    if _PRIMARY_TTS is None:
+        raise RuntimeError("No GPT checkpoint loaded. Use the Load button in the UI.")
+    return _PRIMARY_TTS
+
+
+def _model_status_text() -> str:
+    if _PRIMARY_TTS is None:
+        return "⚠️ No model loaded. Select a GPT checkpoint and BPE tokenizer, then click Load."
+    gpt_path = _MODEL_SELECTION.get("gpt")
+    bpe_path = _MODEL_SELECTION.get("bpe")
+    gpt_name = Path(gpt_path).name if gpt_path else "?"
+    bpe_name = Path(bpe_path).name if bpe_path else "?"
+    return f"✅ Loaded GPT: **{gpt_name}** | BPE: **{bpe_name}**"
+
+
+def _format_label(path: str) -> str:
+    path_obj = Path(path)
+    candidates: List[str] = []
+
+    try:
+        rel_model = os.path.relpath(path, cmd_args.model_dir)
+        if not rel_model.startswith(".."):
+            prefix = Path(cmd_args.model_dir).name or "checkpoints"
+            candidates.append(f"{prefix}/{rel_model}".replace("\\", "/"))
+    except ValueError:
+        pass
+
+    try:
+        rel_repo = os.path.relpath(path, current_dir)
+        if not rel_repo.startswith(".."):
+            candidates.append(rel_repo.replace("\\", "/"))
+    except ValueError:
+        pass
+
+    candidates.append(path_obj.name)
+    for label in candidates:
+        if label:
+            return label
+    return str(path_obj)
+
+
+def _format_dropdown_choices(
+    paths: List[str],
+    current_selection: Optional[str],
+) -> Tuple[List[str], Dict[str, str], Optional[str]]:
+    labels: List[str] = []
+    mapping: Dict[str, str] = {}
+    selected_label: Optional[str] = None
+    for path in paths:
+        label = _format_label(path)
+        base_label = label
+        suffix = 1
+        while label in mapping:
+            label = f"{base_label} ({suffix})"
+            suffix += 1
+        mapping[label] = path
+        labels.append(label)
+        if current_selection and os.path.abspath(path) == os.path.abspath(current_selection):
+            selected_label = label
+    if labels and selected_label is None:
+        selected_label = labels[0]
+    return labels, mapping, selected_label
+>>>>>>> myfork/training_v2
 
 
 @dataclass
@@ -251,6 +446,75 @@ class GenerationJob:
     max_tokens: int
     generation_kwargs: Dict[str, Any]
     verbose: bool
+<<<<<<< HEAD
+=======
+    duration_seconds: Optional[float] = None
+
+
+def _normalize_seed(seed_value: Any) -> Optional[int]:
+    if seed_value is None:
+        return None
+    if isinstance(seed_value, str):
+        value = seed_value.strip()
+        if not value:
+            return None
+        try:
+            seed = int(value)
+        except ValueError:
+            try:
+                seed = int(float(value))
+            except ValueError:
+                return None
+    elif isinstance(seed_value, bool):
+        seed = int(seed_value)
+    elif isinstance(seed_value, float):
+        if math.isnan(seed_value):
+            return None
+        seed = int(seed_value)
+    else:
+        try:
+            seed = int(seed_value)
+        except (TypeError, ValueError):
+            return None
+    if seed < 0:
+        seed = abs(seed)
+    return seed
+
+
+def _normalize_duration_seconds(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if seconds <= 0:
+        return None
+    return seconds
+
+
+def _apply_seed(seed: Optional[int]) -> None:
+    if seed is None:
+        return
+    py_seed = int(seed % (2**32))
+    random.seed(py_seed)
+    np.random.seed(py_seed)
+    torch_seed = int(seed % (2**63 - 1))
+    torch.manual_seed(torch_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(torch_seed)
+
+
+def _prepare_generation_kwargs(raw_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    kwargs = dict(raw_kwargs or {})
+    seed = _normalize_seed(kwargs.pop("seed", None))
+    _apply_seed(seed)
+    return kwargs
+>>>>>>> myfork/training_v2
 
 
 def _worker_loop(job_queue: mp.Queue, result_queue: mp.Queue, config: Dict[str, Any]):
@@ -265,12 +529,26 @@ def _worker_loop(job_queue: mp.Queue, result_queue: mp.Queue, config: Dict[str, 
         os.environ.setdefault("TORCH_HOME", torch_cache)
         os.makedirs(torch_cache, exist_ok=True)
     os.environ.setdefault("INDEXTTS_USE_DEEPSPEED", "0")
+<<<<<<< HEAD
+=======
+    gpt_override = config.get("gpt_path")
+    bpe_override = config.get("bpe_path")
+    if not gpt_override or not bpe_override:
+        result_queue.put({"type": "init_error", "error": "No GPT/BPE model loaded. Use the Load button."})
+        return
+>>>>>>> myfork/training_v2
     try:
         worker_tts = IndexTTS2(
             model_dir=config["model_dir"],
             cfg_path=os.path.join(config["model_dir"], "config.yaml"),
             is_fp16=config.get("is_fp16", False),
             use_cuda_kernel=False,
+<<<<<<< HEAD
+=======
+            use_accel=True,
+            gpt_checkpoint_path=gpt_override,
+            bpe_model_path=bpe_override,
+>>>>>>> myfork/training_v2
         )
     except Exception as exc:  # pragma: no cover - worker init path
         logger.exception("Worker failed to initialize")
@@ -288,6 +566,10 @@ def _worker_loop(job_queue: mp.Queue, result_queue: mp.Queue, config: Dict[str, 
             emo_alpha = job["emo_weight"] if emo_mode == 1 else 1.0
             emo_vector = job["emo_vector"] if emo_mode == 2 else None
             use_emo_text = emo_mode == 3
+<<<<<<< HEAD
+=======
+            generation_kwargs = _prepare_generation_kwargs(job.get("generation_kwargs", {}))
+>>>>>>> myfork/training_v2
 
             worker_tts.infer(
                 spk_audio_prompt=job["prompt_path"],
@@ -301,7 +583,12 @@ def _worker_loop(job_queue: mp.Queue, result_queue: mp.Queue, config: Dict[str, 
                 use_random=job["emo_random"],
                 verbose=job.get("verbose", False),
                 max_text_tokens_per_sentence=job["max_tokens"],
+<<<<<<< HEAD
                 **job["generation_kwargs"],
+=======
+                duration_seconds=job.get("duration_seconds"),
+                **generation_kwargs,
+>>>>>>> myfork/training_v2
             )
             result_queue.put(
                 {
@@ -346,9 +633,95 @@ MAX_LENGTH_TO_USE_SPEED = 70
 
 
 def create_demo() -> gr.Blocks:
+<<<<<<< HEAD
     tts = ensure_primary_tts()
 
     with gr.Blocks(title="IndexTTS Parallel Demo") as demo:
+=======
+    gpt_choices = _discover_gpt_checkpoints()
+    bpe_choices = _discover_bpe_models()
+    gpt_labels, gpt_map, initial_gpt_label = _format_dropdown_choices(gpt_choices, _MODEL_SELECTION["gpt"])
+    bpe_labels, bpe_map, initial_bpe_label = _format_dropdown_choices(bpe_choices, _MODEL_SELECTION["bpe"])
+
+    gpt_cfg = getattr(BASE_CFG, "gpt", {})
+    max_mel_tokens_limit = int(getattr(gpt_cfg, "max_mel_tokens", 2048))
+    if max_mel_tokens_limit < 100:
+        max_mel_tokens_limit = 100
+    default_mel_value = min(1500, max_mel_tokens_limit)
+    max_text_tokens_limit = int(getattr(gpt_cfg, "max_text_tokens", 256))
+    if max_text_tokens_limit < 40:
+        max_text_tokens_limit = 40
+    default_text_tokens = min(120, max_text_tokens_limit)
+    cfg_version = getattr(BASE_CFG, "version", "1.0")
+
+    with gr.Blocks(title="IndexTTS Parallel Demo") as demo:
+        model_status = gr.Markdown(value=_model_status_text())
+        gpt_map_state = gr.State(gpt_map)
+        bpe_map_state = gr.State(bpe_map)
+        with gr.Row():
+            gpt_dropdown = gr.Dropdown(
+                choices=gpt_labels,
+                value=initial_gpt_label,
+                label="GPT Checkpoint (.pth)",
+                interactive=True,
+            )
+            bpe_dropdown = gr.Dropdown(
+                choices=bpe_labels,
+                value=initial_bpe_label,
+                label="BPE Tokenizer (.model)",
+                interactive=True,
+            )
+            refresh_models_button = gr.Button("Refresh Models", variant="secondary")
+            load_models_button = gr.Button("Load Models", variant="primary")
+
+        def refresh_model_lists():
+            gpt_files = _discover_gpt_checkpoints()
+            bpe_files = _discover_bpe_models()
+            gpt_labels_new, gpt_map_new, gpt_value = _format_dropdown_choices(gpt_files, _MODEL_SELECTION["gpt"])
+            bpe_labels_new, bpe_map_new, bpe_value = _format_dropdown_choices(bpe_files, _MODEL_SELECTION["bpe"])
+            return (
+                gr.update(choices=gpt_labels_new, value=gpt_value),
+                gr.update(choices=bpe_labels_new, value=bpe_value),
+                gpt_map_new,
+                bpe_map_new,
+                _model_status_text(),
+            )
+
+        def handle_model_load(
+            gpt_label: Optional[str],
+            bpe_label: Optional[str],
+            gpt_map_value: Optional[Dict[str, str]],
+            bpe_map_value: Optional[Dict[str, str]],
+            progress: gr.Progress = gr.Progress(track_tqdm=False),
+        ) -> str:
+            gpt_map_local = gpt_map_value or {}
+            bpe_map_local = bpe_map_value or {}
+            gpt_path = gpt_map_local.get(gpt_label or "", gpt_label)
+            bpe_path = bpe_map_local.get(bpe_label or "", bpe_label)
+            if not gpt_path or not bpe_path:
+                gr.Warning("Select both a GPT checkpoint and a BPE tokenizer before loading.")
+                return _model_status_text()
+            progress(0.1, "Loading models...")
+            try:
+                load_primary_tts(gpt_path, bpe_path)
+            except Exception as exc:
+                logger.exception("Failed to load models")
+                gr.Warning(f"Failed to load models: {exc}")
+                return f"❌ Failed to load models: {exc}"
+            gr.Info("Models loaded successfully.")
+            return _model_status_text()
+
+        refresh_models_button.click(
+            refresh_model_lists,
+            inputs=[],
+            outputs=[gpt_dropdown, bpe_dropdown, gpt_map_state, bpe_map_state, model_status],
+        )
+        load_models_button.click(
+            handle_model_load,
+            inputs=[gpt_dropdown, bpe_dropdown, gpt_map_state, bpe_map_state],
+            outputs=model_status,
+        )
+>>>>>>> myfork/training_v2
         batch_rows_state = gr.State([])
         next_batch_id_state = gr.State(1)
 
@@ -408,22 +781,56 @@ def create_demo() -> gr.Blocks:
                         length_penalty = gr.Number(label="length_penalty", precision=None, value=0.0, minimum=-2.0, maximum=2.0, step=0.1)
                     max_mel_tokens = gr.Slider(
                         label="max_mel_tokens",
+<<<<<<< HEAD
                         value=1500,
                         minimum=50,
                         maximum=tts.cfg.gpt.max_mel_tokens,
                         step=10,
                         info="Maximum generated mel tokens",
                     )
+=======
+                        value=default_mel_value,
+                        minimum=50,
+                        maximum=max_mel_tokens_limit,
+                        step=10,
+                        info="Maximum generated mel tokens",
+                    )
+                    seed_value = gr.Number(
+                        label="Seed",
+                        value=None,
+                        precision=0,
+                        minimum=0,
+                        step=1,
+                        info="Leave blank for random sampling; set a value for reproducible outputs.",
+                    )
+>>>>>>> myfork/training_v2
                 with gr.Column(scale=2):
                     gr.Markdown("**Sentence Settings**")
                     max_text_tokens_per_sentence = gr.Slider(
                         label="Max tokens per sentence",
+<<<<<<< HEAD
                         value=120,
                         minimum=20,
                         maximum=tts.cfg.gpt.max_text_tokens,
                         step=2,
                         key="max_text_tokens_per_sentence",
                     )
+=======
+                        value=default_text_tokens,
+                        minimum=20,
+                        maximum=max_text_tokens_limit,
+                        step=2,
+                        key="max_text_tokens_per_sentence",
+                    )
+                    duration_seconds_input = gr.Number(
+                        label="Target duration (seconds)",
+                        value=None,
+                        precision=2,
+                        minimum=0,
+                        step=0.1,
+                        info="Optional: approximate overall audio length. Leave blank for free duration.",
+                    )
+>>>>>>> myfork/training_v2
                     with gr.Accordion("Preview sentences", open=True):
                         sentences_preview = gr.Dataframe(
                             headers=["Index", "Sentence", "Token Count"],
@@ -439,6 +846,10 @@ def create_demo() -> gr.Blocks:
             num_beams,
             repetition_penalty,
             max_mel_tokens,
+<<<<<<< HEAD
+=======
+            seed_value,
+>>>>>>> myfork/training_v2
         ]
 
         with gr.Tab("Single Generation"):
@@ -449,7 +860,11 @@ def create_demo() -> gr.Blocks:
                         label="Text",
                         key="input_text_single",
                         placeholder="Enter text to synthesize",
+<<<<<<< HEAD
                         info=f"Model version {tts.model_version or '1.0'}",
+=======
+                        info=f"Model version {cfg_version}",
+>>>>>>> myfork/training_v2
                     )
                     gen_button = gr.Button("Generate", key="gen_button", interactive=True)
             output_audio = gr.Audio(label="Generated Result", visible=True, key="output_audio")
@@ -540,6 +955,10 @@ def create_demo() -> gr.Blocks:
             emo_text_value,
             emo_random_value,
             max_text_tokens_per_sentence_value,
+<<<<<<< HEAD
+=======
+            duration_seconds_value,
+>>>>>>> myfork/training_v2
             *args,
             progress: gr.Progress = gr.Progress(),
         ):
@@ -548,6 +967,7 @@ def create_demo() -> gr.Blocks:
                 return gr.update()
 
             output_path = os.path.join(current_dir, "outputs", f"spk_{int(time.time())}.wav")
+<<<<<<< HEAD
             ensure_primary_tts().gr_progress = progress
 
             (do_sample_value,
@@ -569,6 +989,22 @@ def create_demo() -> gr.Blocks:
                 "repetition_penalty": float(repetition_penalty_value),
                 "max_mel_tokens": int(max_mel_tokens_value),
             }
+=======
+            try:
+                tts = ensure_primary_tts()
+            except RuntimeError as exc:
+                gr.Warning(str(exc))
+                return gr.update()
+
+            tts.gr_progress = progress
+
+            advanced_values = list(args)
+            expected_len = len(advanced_params)
+            if len(advanced_values) < expected_len:
+                advanced_values.extend([None] * (expected_len - len(advanced_values)))
+            raw_generation_kwargs = build_generation_kwargs(*advanced_values[:expected_len])
+            generation_kwargs = _prepare_generation_kwargs(raw_generation_kwargs)
+>>>>>>> myfork/training_v2
 
             emo_mode = emo_control_method_value if isinstance(emo_control_method_value, int) else getattr(emo_control_method_value, "value", 0)
             if emo_mode == 2:
@@ -580,7 +1016,13 @@ def create_demo() -> gr.Blocks:
             else:
                 emo_vector = None
 
+<<<<<<< HEAD
             ensure_primary_tts().infer(
+=======
+            duration_seconds = _normalize_duration_seconds(duration_seconds_value)
+
+            tts.infer(
+>>>>>>> myfork/training_v2
                 spk_audio_prompt=prompt,
                 text=text,
                 output_path=output_path,
@@ -592,7 +1034,12 @@ def create_demo() -> gr.Blocks:
                 use_random=emo_random_value,
                 verbose=cmd_args.verbose,
                 max_text_tokens_per_sentence=int(max_text_tokens_per_sentence_value),
+<<<<<<< HEAD
                 **kwargs,
+=======
+                duration_seconds=duration_seconds,
+                **generation_kwargs,
+>>>>>>> myfork/training_v2
             )
 
             return gr.update(value=output_path, visible=True)
@@ -601,8 +1048,19 @@ def create_demo() -> gr.Blocks:
             if not text_value:
                 return {sentences_preview: gr.update(value=[], visible=True, type="array")}
 
+<<<<<<< HEAD
             tokenized = ensure_primary_tts().tokenizer.tokenize(text_value)
             sentences = ensure_primary_tts().tokenizer.split_segments(
+=======
+            try:
+                tts = ensure_primary_tts()
+            except RuntimeError as exc:
+                gr.Warning(str(exc))
+                return {sentences_preview: gr.update(value=[], visible=True, type="array")}
+
+            tokenized = tts.tokenizer.tokenize(text_value)
+            sentences = tts.tokenizer.split_segments(
+>>>>>>> myfork/training_v2
                 tokenized, max_text_tokens_per_segment=int(max_tokens_value)
             )
             data = []
@@ -760,7 +1218,21 @@ def create_demo() -> gr.Blocks:
                 vec = vec_values
             return mode, vec
 
+<<<<<<< HEAD
         def build_generation_kwargs(do_sample_value, top_p_value, top_k_value, temperature_value, length_penalty_value, num_beams_value, repetition_penalty_value, max_mel_tokens_value):
+=======
+        def build_generation_kwargs(
+            do_sample_value,
+            top_p_value,
+            top_k_value,
+            temperature_value,
+            length_penalty_value,
+            num_beams_value,
+            repetition_penalty_value,
+            max_mel_tokens_value,
+            seed_value,
+        ):
+>>>>>>> myfork/training_v2
             try:
                 top_k_int = int(top_k_value)
             except (TypeError, ValueError):
@@ -769,7 +1241,11 @@ def create_demo() -> gr.Blocks:
                 num_beams_int = int(num_beams_value)
             except (TypeError, ValueError):
                 num_beams_int = 1
+<<<<<<< HEAD
             return {
+=======
+            kwargs = {
+>>>>>>> myfork/training_v2
                 "do_sample": bool(do_sample_value),
                 "top_p": float(top_p_value),
                 "top_k": top_k_int if top_k_int > 0 else None,
@@ -779,6 +1255,13 @@ def create_demo() -> gr.Blocks:
                 "repetition_penalty": float(repetition_penalty_value),
                 "max_mel_tokens": int(max_mel_tokens_value),
             }
+<<<<<<< HEAD
+=======
+            seed_int = _normalize_seed(seed_value)
+            if seed_int is not None:
+                kwargs["seed"] = seed_int
+            return kwargs
+>>>>>>> myfork/training_v2
 
         def load_dataset_entries(dataset_path, rows, next_id, selected_value, *, progress: Optional[gr.Progress] = None):
             rows = rows or []
@@ -892,7 +1375,11 @@ def create_demo() -> gr.Blocks:
             _update_progress(progress, 1.0, desc="Dataset load complete")
             return updated_rows, next_id, gr.update(value=dataset_path), table_update, dropdown_update, prompt_update, output_update, text_update, status_update
 
+<<<<<<< HEAD
         def generate_all_batch(rows, selected_value, worker_count_value, emo_control_method_value, emo_ref_path, emo_weight_value, vec1_value, vec2_value, vec3_value, vec4_value, vec5_value, vec6_value, vec7_value, vec8_value, emo_text_value, emo_random_value, max_text_tokens_per_sentence_value, *advanced_param_values, progress: Optional[gr.Progress] = None):
+=======
+        def generate_all_batch(rows, selected_value, worker_count_value, emo_control_method_value, emo_ref_path, emo_weight_value, vec1_value, vec2_value, vec3_value, vec4_value, vec5_value, vec6_value, vec7_value, vec8_value, emo_text_value, emo_random_value, max_text_tokens_per_sentence_value, duration_seconds_value, *advanced_param_values, progress: Optional[gr.Progress] = None):
+>>>>>>> myfork/training_v2
             rows = rows or []
             if not rows:
                 gr.Warning("Add prompt audio files before generating.")
@@ -901,6 +1388,16 @@ def create_demo() -> gr.Blocks:
                 status_update = format_batch_status(row)
                 return rows, table_update, dropdown_update, prompt_update, output_update, text_update, status_update
 
+<<<<<<< HEAD
+=======
+            if parallel_worker_config.get("gpt_path") is None or parallel_worker_config.get("bpe_path") is None:
+                gr.Warning("Load a GPT checkpoint and BPE tokenizer before generating.")
+                dropdown_update, _, prompt_update, output_update, text_update, row = prepare_batch_selection(rows, selected_value)
+                table_update = gr.update(value=build_batch_table_data(rows))
+                status_update = format_batch_status(row, "Model not loaded.")
+                return rows, table_update, dropdown_update, prompt_update, output_update, text_update, status_update
+
+>>>>>>> myfork/training_v2
             vec_values = [vec1_value, vec2_value, vec3_value, vec4_value, vec5_value, vec6_value, vec7_value, vec8_value]
             emo_mode, emo_vector = validate_emotion_settings(emo_control_method_value, vec_values)
             if emo_mode == 2 and emo_vector is None:
@@ -914,7 +1411,19 @@ def create_demo() -> gr.Blocks:
             except (TypeError, ValueError):
                 max_tokens = 120
 
+<<<<<<< HEAD
             generation_kwargs = build_generation_kwargs(*advanced_param_values)
+=======
+            duration_seconds = _normalize_duration_seconds(duration_seconds_value)
+
+            duration_seconds = _normalize_duration_seconds(duration_seconds_value)
+
+            adv_values = list(advanced_param_values)
+            expected_len = len(advanced_params)
+            if len(adv_values) < expected_len:
+                adv_values.extend([None] * (expected_len - len(adv_values)))
+            base_generation_kwargs = build_generation_kwargs(*adv_values[:expected_len])
+>>>>>>> myfork/training_v2
 
             outputs_dir = os.path.join(current_dir, "outputs", "tasks")
             os.makedirs(outputs_dir, exist_ok=True)
@@ -951,8 +1460,14 @@ def create_demo() -> gr.Blocks:
                         emo_random=bool(emo_random_value),
                         emo_ref_path=emo_ref_path if emo_mode == 1 else None,
                         max_tokens=max_tokens,
+<<<<<<< HEAD
                         generation_kwargs=generation_kwargs,
                         verbose=cmd_args.verbose,
+=======
+                        generation_kwargs=dict(base_generation_kwargs),
+                        verbose=cmd_args.verbose,
+                        duration_seconds=duration_seconds,
+>>>>>>> myfork/training_v2
                     )
                 )
 
@@ -987,7 +1502,11 @@ def create_demo() -> gr.Blocks:
             status_update = format_batch_status(selected_row, "Parallel generation finished.")
             return final_rows, table_update, dropdown_update, prompt_update, output_update, text_update, status_update
 
+<<<<<<< HEAD
         def regenerate_batch_entry(rows, selected_value, worker_count_value, emo_control_method_value, emo_ref_path, emo_weight_value, vec1_value, vec2_value, vec3_value, vec4_value, vec5_value, vec6_value, vec7_value, vec8_value, emo_text_value, emo_random_value, max_text_tokens_per_sentence_value, *advanced_param_values, progress: Optional[gr.Progress] = None):
+=======
+        def regenerate_batch_entry(rows, selected_value, worker_count_value, emo_control_method_value, emo_ref_path, emo_weight_value, vec1_value, vec2_value, vec3_value, vec4_value, vec5_value, vec6_value, vec7_value, vec8_value, emo_text_value, emo_random_value, max_text_tokens_per_sentence_value, duration_seconds_value, *advanced_param_values, progress: Optional[gr.Progress] = None):
+>>>>>>> myfork/training_v2
             rows = rows or []
             dropdown_update, resolved_id, prompt_update, output_update, text_update, selected_row = prepare_batch_selection(rows, selected_value)
             if not selected_row:
@@ -996,6 +1515,15 @@ def create_demo() -> gr.Blocks:
                 status_update = format_batch_status(None)
                 return rows, table_update, dropdown_update, prompt_update, output_update, text_update, status_update
 
+<<<<<<< HEAD
+=======
+            if parallel_worker_config.get("gpt_path") is None or parallel_worker_config.get("bpe_path") is None:
+                gr.Warning("Load a GPT checkpoint and BPE tokenizer before generating.")
+                table_update = gr.update(value=build_batch_table_data(rows))
+                status_update = format_batch_status(selected_row, "Model not loaded.")
+                return rows, table_update, dropdown_update, prompt_update, output_update, text_update, status_update
+
+>>>>>>> myfork/training_v2
             vec_values = [vec1_value, vec2_value, vec3_value, vec4_value, vec5_value, vec6_value, vec7_value, vec8_value]
             emo_mode, emo_vector = validate_emotion_settings(emo_control_method_value, vec_values)
             if emo_mode == 2 and emo_vector is None:
@@ -1022,7 +1550,15 @@ def create_demo() -> gr.Blocks:
             except (TypeError, ValueError):
                 max_tokens = 120
 
+<<<<<<< HEAD
             generation_kwargs = build_generation_kwargs(*advanced_param_values)
+=======
+            adv_values = list(advanced_param_values)
+            expected_len = len(advanced_params)
+            if len(adv_values) < expected_len:
+                adv_values.extend([None] * (expected_len - len(adv_values)))
+            generation_kwargs = build_generation_kwargs(*adv_values[:expected_len])
+>>>>>>> myfork/training_v2
             outputs_dir = os.path.join(current_dir, "outputs", "tasks")
             os.makedirs(outputs_dir, exist_ok=True)
             output_path = os.path.join(outputs_dir, f"batch_row_{selected_row['id']}_{int(time.time() * 1000)}.wav")
@@ -1039,8 +1575,14 @@ def create_demo() -> gr.Blocks:
                 emo_random=bool(emo_random_value),
                 emo_ref_path=emo_ref_path if emo_mode == 1 else None,
                 max_tokens=max_tokens,
+<<<<<<< HEAD
                 generation_kwargs=generation_kwargs,
                 verbose=cmd_args.verbose,
+=======
+                generation_kwargs=dict(generation_kwargs),
+                verbose=cmd_args.verbose,
+                duration_seconds=duration_seconds,
+>>>>>>> myfork/training_v2
             )
 
             _update_progress(progress, 0.0, desc="Regenerating entry")
@@ -1166,6 +1708,10 @@ def create_demo() -> gr.Blocks:
                 emo_text,
                 emo_random,
                 max_text_tokens_per_sentence,
+<<<<<<< HEAD
+=======
+                duration_seconds_input,
+>>>>>>> myfork/training_v2
                 *advanced_params,
             ],
             outputs=[output_audio],
@@ -1216,6 +1762,10 @@ def create_demo() -> gr.Blocks:
                 emo_text,
                 emo_random,
                 max_text_tokens_per_sentence,
+<<<<<<< HEAD
+=======
+                duration_seconds_input,
+>>>>>>> myfork/training_v2
                 *advanced_params,
             ],
             outputs=[batch_rows_state, batch_table, selected_entry, batch_prompt_player, batch_output_player, batch_text_input, batch_status],
@@ -1241,6 +1791,10 @@ def create_demo() -> gr.Blocks:
                 emo_text,
                 emo_random,
                 max_text_tokens_per_sentence,
+<<<<<<< HEAD
+=======
+                duration_seconds_input,
+>>>>>>> myfork/training_v2
                 *advanced_params,
             ],
             outputs=[batch_rows_state, batch_table, selected_entry, batch_prompt_player, batch_output_player, batch_text_input, batch_status],

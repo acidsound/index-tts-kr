@@ -38,7 +38,7 @@ import torch.nn.functional as F
 class IndexTTS2:
     def __init__(
             self, cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, device=None,
-            use_cuda_kernel=None,use_deepspeed=False
+            use_cuda_kernel=None,use_deepspeed=False, use_accel=False, use_torch_compile=False
     ):
         """
         Args:
@@ -48,6 +48,8 @@ class IndexTTS2:
             device (str): device to use (e.g., 'cuda:0', 'cpu'). If None, it will be set automatically based on the availability of CUDA or MPS.
             use_cuda_kernel (None | bool): whether to use BigVGan custom fused activation CUDA kernel, only for CUDA device.
             use_deepspeed (bool): whether to use DeepSpeed or not.
+            use_accel (bool): whether to use acceleration engine for GPT2 or not.
+            use_torch_compile (bool): whether to use torch.compile for optimization or not.
         """
         if device is not None:
             self.device = device
@@ -75,10 +77,12 @@ class IndexTTS2:
         self.model_dir = model_dir
         self.dtype = torch.float16 if self.use_fp16 else None
         self.stop_mel_token = self.cfg.gpt.stop_mel_token
+        self.use_accel = use_accel
+        self.use_torch_compile = use_torch_compile
 
         self.qwen_emo = QwenEmotion(os.path.join(self.model_dir, self.cfg.qwen_emo_path))
 
-        self.gpt = UnifiedVoice(**self.cfg.gpt)
+        self.gpt = UnifiedVoice(**self.cfg.gpt, use_accel=self.use_accel)
         self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
         load_checkpoint(self.gpt, self.gpt_path)
         self.gpt = self.gpt.to(self.device)
@@ -135,6 +139,13 @@ class IndexTTS2:
         )
         self.s2mel = s2mel.to(self.device)
         self.s2mel.models['cfm'].estimator.setup_caches(max_batch_size=1, max_seq_length=8192)
+        
+        # Enable torch.compile optimization if requested
+        if self.use_torch_compile:
+            print(">> Enabling torch.compile optimization")
+            self.s2mel.enable_torch_compile()
+            print(">> torch.compile optimization enabled successfully")
+        
         self.s2mel.eval()
         print(">> s2mel weights restored from:", s2mel_path)
 
@@ -265,6 +276,20 @@ class IndexTTS2:
         code_lens = torch.tensor(code_lens, dtype=torch.long, device=device)
         return codes, code_lens
 
+    def interval_silence(self, wavs, sampling_rate=22050, interval_silence=200):
+        """
+        Silences to be insert between generated segments.
+        """
+
+        if not wavs or interval_silence <= 0:
+            return wavs
+
+        # get channel_size
+        channel_size = wavs[0].size(0)
+        # get silence tensor
+        sil_dur = int(sampling_rate * interval_silence / 1000.0)
+        return torch.zeros(channel_size, sil_dur)
+
     def insert_interval_silence(self, wavs, sampling_rate=22050, interval_silence=200):
         """
         Insert silences between generated segments.
@@ -327,7 +352,32 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=120, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=120, stream_return=False, more_segment_before=0, **generation_kwargs):
+        if stream_return:
+            return self.infer_generator(
+                spk_audio_prompt, text, output_path,
+                emo_audio_prompt, emo_alpha,
+                emo_vector,
+                use_emo_text, emo_text, use_random, interval_silence,
+                verbose, max_text_tokens_per_segment, stream_return, more_segment_before, **generation_kwargs
+            )
+        else:
+            try:
+                return list(self.infer_generator(
+                    spk_audio_prompt, text, output_path,
+                    emo_audio_prompt, emo_alpha,
+                    emo_vector,
+                    use_emo_text, emo_text, use_random, interval_silence,
+                    verbose, max_text_tokens_per_segment, stream_return, more_segment_before, **generation_kwargs
+                ))[0]
+            except IndexError:
+                return None
+
+    def infer_generator(self, spk_audio_prompt, text, output_path,
+              emo_audio_prompt=None, emo_alpha=1.0,
+              emo_vector=None,
+              use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
+              verbose=False, max_text_tokens_per_segment=120, stream_return=False, quick_streaming_tokens=0, **generation_kwargs):
         print(">> starting inference...")
         self._set_gr_progress(0, "starting inference...")
         if verbose:
@@ -414,7 +464,7 @@ class IndexTTS2:
             ref_mel = self.cache_mel
 
         if emo_vector is not None:
-            weight_vector = torch.tensor(emo_vector).to(self.device)
+            weight_vector = torch.tensor(emo_vector, device=self.device)
             if use_random:
                 random_index = [random.randint(0, x - 1) for x in self.emo_num]
             else:
@@ -445,7 +495,7 @@ class IndexTTS2:
 
         self._set_gr_progress(0.1, "text processing...")
         text_tokens_list = self.tokenizer.tokenize(text)
-        segments = self.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment)
+        segments = self.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment, quick_streaming_tokens = quick_streaming_tokens)
         segments_count = len(segments)
 
         text_token_ids = self.tokenizer.convert_tokens_to_ids(text_tokens_list)
@@ -476,6 +526,7 @@ class IndexTTS2:
         s2mel_time = 0
         bigvgan_time = 0
         has_warned = False
+        silence = None # for stream_return
         for seg_idx, sent in enumerate(segments):
             self._set_gr_progress(0.2 + 0.7 * seg_idx / segments_count,
                                   f"speech synthesis {seg_idx + 1}/{segments_count}...")
@@ -540,15 +591,16 @@ class IndexTTS2:
                 #                     print(f"code len: {code_lens}")
 
                 code_lens = []
+                max_code_len = 0
                 for code in codes:
                     if self.stop_mel_token not in code:
-                        code_lens.append(len(code))
                         code_len = len(code)
                     else:
-                        len_ = (code == self.stop_mel_token).nonzero(as_tuple=False)[0] + 1
-                        code_len = len_ - 1
+                        len_ = (code == self.stop_mel_token).nonzero(as_tuple=False)[0]
+                        code_len = len_[0].item() if len_.numel() > 0 else len(code)
                     code_lens.append(code_len)
-                codes = codes[:, :code_len]
+                    max_code_len = max(max_code_len, code_len)
+                codes = codes[:, :max_code_len]
                 code_lens = torch.LongTensor(code_lens)
                 code_lens = code_lens.to(self.device)
                 if verbose:
@@ -608,6 +660,11 @@ class IndexTTS2:
                     print(f"wav shape: {wav.shape}", "min:", wav.min(), "max:", wav.max())
                 # wavs.append(wav[:, :-512])
                 wavs.append(wav.cpu())  # to cpu before saving
+                if stream_return:
+                    yield wav.cpu()
+                    if silence == None:
+                        silence = self.interval_silence(wavs, sampling_rate=sampling_rate, interval_silence=interval_silence)
+                    yield silence
         end_time = time.perf_counter()
 
         self._set_gr_progress(0.9, "saving audio...")
@@ -633,12 +690,16 @@ class IndexTTS2:
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
             torchaudio.save(output_path, wav.type(torch.int16), sampling_rate)
             print(">> wav file saved to:", output_path)
-            return output_path
+            if stream_return:
+                return None
+            yield output_path
         else:
+            if stream_return:
+                return None
             # 返回以符合Gradio的格式要求
             wav_data = wav.type(torch.int16)
             wav_data = wav_data.numpy().T
-            return (sampling_rate, wav_data)
+            yield (sampling_rate, wav_data)
 
 
 def find_most_similar_cosine(query_vector, matrix):
@@ -766,6 +827,25 @@ class QwenEmotion:
 if __name__ == "__main__":
     prompt_wav = "examples/voice_01.wav"
     text = '欢迎大家来体验indextts2，并给予我们意见与反馈，谢谢大家。'
+<<<<<<< HEAD
 
     tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_cuda_kernel=False)
     tts.infer(spk_audio_prompt=prompt_wav, text=text, output_path="gen.wav", verbose=True)
+=======
+    tts = IndexTTS2(
+        cfg_path="checkpoints/config.yaml", 
+        model_dir="checkpoints", 
+        use_cuda_kernel=False,
+        use_torch_compile=True
+    )
+    tts.infer(spk_audio_prompt=prompt_wav, text=text, output_path="gen.wav", verbose=True)
+    char_size = 5
+    import string
+    time_buckets = []
+    for i in range(10):
+        text = ''.join(random.choices(string.ascii_letters, k=char_size))
+        start_time = time.time()
+        tts.infer(spk_audio_prompt=prompt_wav, text=text, output_path="gen.wav", verbose=True)
+        time_buckets.append(time.time() - start_time)
+    print(time_buckets)
+>>>>>>> myfork/training_v2

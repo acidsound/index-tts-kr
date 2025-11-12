@@ -1,4 +1,5 @@
 import functools
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -307,7 +308,7 @@ class UnifiedVoice(nn.Module):
                  start_text_token=0, stop_text_token=1, number_mel_codes=8194, start_mel_token=8192, stop_mel_token=8193,
                  train_solo_embeddings=False, use_mel_codes_as_input=True,
                  checkpointing=True, types=1,
-                 condition_num_latent=32, condition_type="perceiver", condition_module=None, emo_condition_module=None):
+                 condition_num_latent=32, condition_type="perceiver", condition_module=None, emo_condition_module=None, use_accel=False):
         """
         Args:
             layers: Number of layers in transformer stack.
@@ -409,6 +410,9 @@ class UnifiedVoice(nn.Module):
         for module in embeddings:
             module.weight.data.normal_(mean=0.0, std=.02)
 
+        self.use_accel = use_accel
+        self.accel_engine = None  # Will be initialized in post_init_gpt2_config
+
     def post_init_gpt2_config(self, use_deepspeed=False, kv_cache=False, half=False):
         seq_length = self.max_mel_tokens + self.max_text_tokens + 2
         gpt_config = GPT2Config(
@@ -421,6 +425,38 @@ class UnifiedVoice(nn.Module):
             gradient_checkpointing=False,
             use_cache=True,
         )
+
+        if self.use_accel and torch.cuda.is_available():
+            # Check if flash attention is available
+            try:
+                import flash_attn
+            except ImportError:
+                raise ImportError("flash_attn is required for acceleration but not installed. Please install from https://github.com/Dao-AILab/flash-attention/releases/")
+
+            from indextts.accel import GPT2AccelModel, AccelInferenceEngine
+
+            # Create accel model
+            accel_gpt = GPT2AccelModel(gpt_config)
+            accel_gpt.load_state_dict(self.gpt.state_dict(), strict=False)
+
+            if half:
+                accel_gpt = accel_gpt.half().cuda()
+            else:
+                accel_gpt = accel_gpt.cuda()
+            accel_gpt.eval()
+
+            lm_head_with_norm = nn.Sequential(self.final_norm, self.mel_head)
+            self.accel_engine = AccelInferenceEngine(
+                model=accel_gpt,
+                lm_head=lm_head_with_norm,
+                num_layers=self.layers,
+                num_heads=self.heads,
+                head_dim=self.model_dim // self.heads,
+                block_size=256,
+                num_blocks=16,  # Reduce to save memory (16*256 = 4096 tokens capacity)
+                use_cuda_graph=True,
+            )
+            print("acceleration engine initialized")
         self.inference_model = GPT2InferenceModel(
             gpt_config,
             self.gpt,
@@ -542,6 +578,14 @@ class UnifiedVoice(nn.Module):
             conds = conds.unsqueeze(1)
         return conds
 
+    def get_duration_embeddings(self, lengths: torch.Tensor) -> torch.Tensor:
+        """
+        Reuse the learned mel positional embeddings so that duration embeddings share the
+        exact same weight matrix as semantic positions, matching the paper's constraint.
+        """
+        max_index = self.mel_pos_embedding.emb.num_embeddings - 1
+        clamped = lengths.clamp(max=max_index).long()
+        return self.mel_pos_embedding.emb(clamped)
 
     def get_emo_conditioning(self, speech_conditioning_input, cond_mel_lengths=None):
         speech_conditioning_input, mask = self.emo_conditioning_encoder(speech_conditioning_input.transpose(1, 2),
@@ -660,8 +704,23 @@ class UnifiedVoice(nn.Module):
         fake_inputs[:, -1] = self.start_mel_token
         return fake_inputs, batched_mel_emb, attention_mask
 
-    def inference_speech(self, speech_condition, text_inputs, emo_speech_condition=None, cond_lengths=None, emo_cond_lengths=None, emo_vec=None, use_speed=False, input_tokens=None, num_return_sequences=1,
-                         max_generate_length=None, typical_sampling=False, typical_mass=.9, **hf_generate_kwargs):
+    def inference_speech(
+        self,
+        speech_condition,
+        text_inputs,
+        emo_speech_condition=None,
+        cond_lengths=None,
+        emo_cond_lengths=None,
+        emo_vec=None,
+        use_speed=False,
+        input_tokens=None,
+        num_return_sequences=1,
+        max_generate_length=None,
+        typical_sampling=False,
+        typical_mass=.9,
+        target_duration_tokens: Optional[int] = None,
+        **hf_generate_kwargs,
+    ):
         """
         Args:
             speech_condition: (b, d, frames) or (d, frames)
@@ -690,10 +749,19 @@ class UnifiedVoice(nn.Module):
         else:
             print('Use the specified emotion vector')
 
-        tmp = torch.zeros(text_inputs.size(0)).to(text_inputs.device)
-        duration_emb =  self.speed_emb(torch.zeros_like(tmp).long())
-        duration_emb_half = self.speed_emb(torch.ones_like(tmp).long())
-        conds_latent = torch.cat((speech_conditioning_latent + emo_vec.unsqueeze(1), duration_emb_half.unsqueeze(1), duration_emb.unsqueeze(1)), 1)
+        tmp = torch.zeros(text_inputs.size(0), device=text_inputs.device)
+        duration_free = self.speed_emb(torch.zeros_like(tmp).long())
+        if target_duration_tokens is not None:
+            t = int(target_duration_tokens)
+            t = max(1, min(t, self.max_mel_tokens - 1))
+            duration_idx = torch.full((text_inputs.size(0),), t, device=text_inputs.device, dtype=torch.long)
+            duration_ctrl = self.get_duration_embeddings(duration_idx)
+        else:
+            duration_ctrl = self.speed_emb(torch.ones_like(tmp).long())
+        conds_latent = torch.cat(
+            (speech_conditioning_latent + emo_vec.unsqueeze(1), duration_ctrl.unsqueeze(1), duration_free.unsqueeze(1)),
+            1,
+        )
         input_ids, inputs_embeds, attention_mask = self.prepare_gpt_inputs(conds_latent, text_inputs)
         self.inference_model.store_mel_emb(inputs_embeds)
         if input_tokens is None:
@@ -721,12 +789,26 @@ class UnifiedVoice(nn.Module):
             min_tokens_to_keep = 2 if hf_generate_kwargs.get("num_beams", 1) > 1 else 1
             logits_processor.append(TypicalLogitsWarper(mass=typical_mass, min_tokens_to_keep=min_tokens_to_keep))
         max_length = (trunc_index + self.max_mel_tokens - 1) if max_generate_length is None else trunc_index + max_generate_length
-        output = self.inference_model.generate(inputs, 
-                                            bos_token_id=self.start_mel_token, pad_token_id=self.stop_mel_token,
-                                            eos_token_id=self.stop_mel_token, attention_mask=attention_mask,
-                                            max_length=max_length, logits_processor=logits_processor,
-                                            num_return_sequences=num_return_sequences,
-                                            **hf_generate_kwargs)
+        
+        # Use accel engine if available (single sequence only)
+        if self.accel_engine is not None and num_return_sequences == 1:
+            output = self.accel_engine.generate(
+                inputs,  # fake input_ids (all 1s + start_mel_token)
+                max_new_tokens=max_length - trunc_index,
+                attention_mask=attention_mask,
+                temperature=hf_generate_kwargs.get('temperature', 1),
+                stop_tokens=[self.stop_mel_token],
+                tts_embeddings=inputs_embeds,  # [pad][cond][text] embeddings (87 tokens, NO start_mel_token)
+                tts_mel_embedding=self.inference_model.embeddings,  # mel_embedding layer
+                tts_text_pos_embedding=self.inference_model.text_pos_embedding,  # text_pos_embedding layer
+            )
+        else:
+            output = self.inference_model.generate(inputs, 
+                                                bos_token_id=self.start_mel_token, pad_token_id=self.stop_mel_token,
+                                                eos_token_id=self.stop_mel_token, attention_mask=attention_mask,
+                                                max_length=max_length, logits_processor=logits_processor,
+                                                num_return_sequences=num_return_sequences,
+                                                **hf_generate_kwargs)
         if isinstance(output, torch.Tensor):
             return output[:, trunc_index:], speech_conditioning_latent
         # GenerateOutput
