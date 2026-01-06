@@ -1,3 +1,15 @@
+# Korean Adaptation & Optimization (acidsound fork)
+
+This fork contains optimization and fixes for Korean Text-to-Speech using IndexTTS2.
+
+### Key Modifications:
+- **Korean Tokenizer Fixes**: Resolved `[UNK]` token issues by implementing CJK-spacing awareness and forcing inclusion of all 11,172 Hangul syllables in the BPE model.
+- **Enhanced Speaker Adaptation**: Improved zero-shot performance by implementing **Prompt Dropout (Classifier-Free Guidance)** during training, preventing the "dataset-baked" voice effect and allowing better imitation of external speaker prompts.
+- **Increased Speaker Diversity**: Re-indexed AI Hub datasets to leverage 48 unique speakers (previously 3), providing a more robust foundation for speaker conditioning.
+- **Windows 11 Optimization**: Added support for pre-compiled **Flash-Attention (v2.8.3)** wheels for Windows, along with tailored batch scripts (`train_ko.bat`, `test_ko.bat`) for easy workflow management.
+
+---
+
 ## Unofficial IndexTTS v2 Training Repo
 > Loop and trainer implemented using Codex CLI and guided prompts
   - Train new languages by extending existing tokenizer
