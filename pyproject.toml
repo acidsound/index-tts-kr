@@ -117,7 +117,8 @@ torchaudio = [
 torchvision = [
   { index = "pytorch-cuda", marker = "sys_platform == 'linux' or sys_platform == 'win32'", extra = "cu128" },
 ]
-flash-attn = { path = "flash_attn-2.8.3+cu128torch2.8.0cxx11abiFALSE-cp310-cp310-win_amd64.whl" }
+# Install flash-attn from a pre-compiled Windows wheel.
+"flash-attn" = { url = "https://github.com/kingbri1/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu128torch2.8.0cxx11abiFALSE-cp310-cp310-win_amd64.whl" }
 
 
 [[tool.uv.index]]

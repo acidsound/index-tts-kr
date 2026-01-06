@@ -91,6 +91,12 @@ def parse_args() -> argparse.Namespace:
         default=0.3,
         help="Probability of zeroing duration embeddings when --use-duration-control is enabled.",
     )
+    parser.add_argument(
+        "--condition-dropout",
+        type=float,
+        default=0.2,
+        help="Probability of zeroing speaker prompt condition and emo_vec during training.",
+    )
     parser.add_argument("--seed", type=int, default=1234, help="Random seed.")
     return parser.parse_args()
 
@@ -470,6 +476,7 @@ def compute_losses(
     device: torch.device,
     use_duration_control: bool = False,
     duration_dropout: float = 0.3,
+    condition_dropout: float = 0.2,
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, float]]:
     condition = batch["condition"].to(device)
     text_ids = batch["text_ids"].to(device)
@@ -477,6 +484,14 @@ def compute_losses(
     emo_vec = batch["emo_vec"].to(device)
     text_lengths = batch["text_lengths"].to(device)
     code_lengths = batch["code_lengths"].to(device)
+
+    # Classifier-Free Guidance Training: Drop condition and emo_vec with some probability
+    if condition_dropout > 0:
+        drop_mask = torch.rand(condition.size(0), 1, 1, device=device) < condition_dropout
+        condition = torch.where(drop_mask, torch.zeros_like(condition), condition)
+        
+        drop_mask_emo = drop_mask.view(-1, 1)
+        emo_vec = torch.where(drop_mask_emo, torch.zeros_like(emo_vec), emo_vec)
 
     batch_size = text_ids.size(0)
     use_speed = torch.zeros(batch_size, dtype=torch.long, device=device)
@@ -575,6 +590,7 @@ def evaluate(
     device: torch.device,
     use_duration_control: bool = False,
     duration_dropout: float = 0.3,
+    condition_dropout: float = 0.2,
 ) -> Dict[str, float]:
     model.eval()
     totals = {"text_loss": 0.0, "mel_loss": 0.0, "mel_top1": 0.0}
@@ -587,6 +603,7 @@ def evaluate(
                 device,
                 use_duration_control=use_duration_control,
                 duration_dropout=duration_dropout,
+                condition_dropout=condition_dropout,
             )
             bsz = batch["text_ids"].size(0)
             totals["text_loss"] += text_loss.item() * bsz
@@ -726,6 +743,7 @@ def main() -> None:
                     device,
                     use_duration_control=args.use_duration_control,
                     duration_dropout=args.duration_dropout,
+                    condition_dropout=args.condition_dropout,
                 )
                 loss = args.text_loss_weight * text_loss + args.mel_loss_weight * mel_loss
             if use_amp:
@@ -766,6 +784,7 @@ def main() -> None:
                         device,
                         use_duration_control=args.use_duration_control,
                         duration_dropout=args.duration_dropout,
+                        condition_dropout=args.condition_dropout,
                     )
                     writer.add_scalar("val/text_loss", val_metrics["text_loss"], global_step)
                     writer.add_scalar("val/mel_loss", val_metrics["mel_loss"], global_step)
@@ -829,6 +848,7 @@ def main() -> None:
                 device,
                 use_duration_control=args.use_duration_control,
                 duration_dropout=args.duration_dropout,
+                condition_dropout=args.condition_dropout,
             )
             writer.add_scalar("val/text_loss", val_metrics["text_loss"], global_step)
             writer.add_scalar("val/mel_loss", val_metrics["mel_loss"], global_step)

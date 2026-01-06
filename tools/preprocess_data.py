@@ -263,7 +263,20 @@ def build_unified_voice(cfg, checkpoint: Path, device: torch.device) -> UnifiedV
     gpt = UnifiedVoice(**cfg.gpt)
     ckpt = torch.load(checkpoint, map_location="cpu")
     state = ckpt.get("model", ckpt)
-    gpt.load_state_dict(state, strict=False)
+    
+    # Filter state dict to avoid shape mismatches (e.g. from tokenizer extension)
+    model_dict = gpt.state_dict()
+    filtered_state = {}
+    for k, v in state.items():
+        if k in model_dict:
+            if v.shape == model_dict[k].shape:
+                filtered_state[k] = v
+            else:
+                print(f"[build_unified_voice] Skipping {k} due to shape mismatch: {v.shape} vs {model_dict[k].shape}")
+        else:
+            print(f"[build_unified_voice] Skipping {k} because it is not in the model")
+            
+    gpt.load_state_dict(filtered_state, strict=False)
     gpt = gpt.to(device)
     gpt.eval()
     return gpt

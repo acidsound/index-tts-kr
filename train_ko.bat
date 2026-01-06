@@ -1,0 +1,18 @@
+uv run python trainers/train_gpt_v2.py ^
+    --train-manifest ko_processed_data/gpt_pairs_train.jsonl::ko ^
+    --val-manifest ko_processed_data/gpt_pairs_val.jsonl::ko ^
+    --tokenizer checkpoints/bpe_multilingual.model ^
+    --config checkpoints/config_finetune.yaml ^
+    --base-checkpoint checkpoints/gpt.pth ^
+    --output-dir trained_ckpts_ko ^
+    --batch-size 8 ^
+    --grad-accumulation 4 ^
+    --epochs 10 ^
+    --learning-rate 1e-5 ^
+    --warmup-steps 500 ^
+    --log-interval 1 ^
+    --val-interval 1000 ^
+    --use-duration-control ^
+    --resume trained_ckpts_ko/model_step4000.pth ^
+    --condition-dropout 0.15 ^
+    --amp

@@ -204,6 +204,28 @@ def append_tokens(
         if len(appended) >= needed:
             break
 
+    # Force add Hangul syllables (AC00 - D7A3) to ensure full Korean coverage
+    if len(appended) < needed:
+        for i in range(0xAC00, 0xD7A4):
+            ch = chr(i)
+            if ch in existing_texts:
+                continue
+            # Use candidate piece if available, otherwise create a simplified piece
+            piece = candidate_lookup.get(ch)
+            if piece:
+                add_piece(piece)
+            else:
+                # If the character wasn't in the candidate vocab, create it with a very low score
+                new_piece = base_proto.pieces.add()
+                new_piece.piece = ch
+                new_piece.score = -1000.0  # low score for fallback characters
+                new_piece.type = sp_model.ModelProto.SentencePiece.Type.NORMAL
+                existing_texts.add(ch)
+                appended.append(new_piece)
+            
+            if len(appended) >= needed:
+                break
+
     if len(appended) < needed:
         for piece in candidate_proto.pieces:
             if piece.type not in allowed_types:
@@ -250,7 +272,7 @@ def main() -> int:
         )
 
     candidate_size = args.candidate_size or int(target_size * args.extra_factor)
-    candidate_size = max(candidate_size, target_size + 1024)  # ensure some headroom
+    # candidate_size = max(candidate_size, target_size + 1024)  # ensure some headroom
 
     corpus_path, total_samples = collect_corpus(args.manifests)
     print(f"[extend_bpe] Collected {total_samples} samples into {corpus_path}")
