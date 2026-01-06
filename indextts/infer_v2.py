@@ -516,8 +516,8 @@ class IndexTTS2:
         autoregressive_batch_size = 1
         length_penalty = generation_kwargs.pop("length_penalty", 0.0)
         num_beams = generation_kwargs.pop("num_beams", 3)
-        repetition_penalty = generation_kwargs.pop("repetition_penalty", 10.0)
-        max_mel_tokens = generation_kwargs.pop("max_mel_tokens", 1500)
+        repetition_penalty = generation_kwargs.pop("repetition_penalty", 1.1)
+        max_mel_tokens = generation_kwargs.pop("max_mel_tokens", self.cfg.gpt.max_mel_tokens)
         sampling_rate = 22050
 
         wavs = []

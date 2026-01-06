@@ -24,24 +24,16 @@ parser.add_argument("--verbose", action="store_true", default=False, help="Enabl
 parser.add_argument("--port", type=int, default=7860, help="Port to run the web UI on")
 parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to run the web UI on")
 parser.add_argument("--model_dir", type=str, default="checkpoints", help="Model checkpoints directory")
+parser.add_argument("--config", type=str, default=None, help="Path to the config file (defaults to config.yaml in model_dir)")
+parser.add_argument("--gpt_checkpoint", type=str, default=None, help="Path to the GPT checkpoint (defaults to gpt.pth in model_dir)")
+parser.add_argument("--bpe_model", type=str, default=None, help="Path to the BPE model (defaults to bpe.model in model_dir)")
 parser.add_argument("--is_fp16", action="store_true", default=False, help="Fp16 infer")
 cmd_args = parser.parse_args()
 
+# Startup basic directory check
 if not os.path.exists(cmd_args.model_dir):
     print(f"Model directory {cmd_args.model_dir} does not exist. Please download the model first.")
     sys.exit(1)
-
-for file in [
-    "bpe.model",
-    "gpt.pth",
-    "config.yaml",
-    "s2mel.pth",
-    "wav2vec2bert_stats.pt"
-]:
-    file_path = os.path.join(cmd_args.model_dir, file)
-    if not os.path.exists(file_path):
-        print(f"Required file {file_path} does not exist. Please download it.")
-        sys.exit(1)
 
 # Configure environment paths before importing heavy dependencies so child modules see them
 hf_cache_dir = os.path.join(cmd_args.model_dir, "hf_cache")
@@ -62,11 +54,18 @@ from modelscope.hub import api
 
 i18n = I18nAuto(language="Auto")
 MODE = 'local'
+# Determine paths with precedence: CMD argument > model_dir/default
+cfg_path = cmd_args.config if cmd_args.config else os.path.join(cmd_args.model_dir, "config.yaml")
+gpt_path = cmd_args.gpt_checkpoint # IndexTTS2 handles None as config default
+bpe_path = cmd_args.bpe_model
+
 tts = IndexTTS2(
     model_dir=cmd_args.model_dir,
-    cfg_path=os.path.join(cmd_args.model_dir, "config.yaml"),
+    cfg_path=cfg_path,
     is_fp16=cmd_args.is_fp16,
     use_cuda_kernel=False,
+    gpt_checkpoint_path=gpt_path,
+    bpe_model_path=bpe_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -125,9 +124,10 @@ def gen_single(emo_control_method,prompt, text,
         output_path = os.path.join("outputs", f"spk_{int(time.time())}.wav")
     # set gradio progress
     tts.gr_progress = progress
-    do_sample, top_p, top_k, temperature, \
+    duration, do_sample, top_p, top_k, temperature, \
         length_penalty, num_beams, repetition_penalty, max_mel_tokens = args
     kwargs = {
+        "duration_seconds": float(duration) if float(duration) > 0 else None,
         "do_sample": bool(do_sample),
         "top_p": float(top_p),
         "top_k": int(top_k) if int(top_k) > 0 else None,
@@ -136,8 +136,6 @@ def gen_single(emo_control_method,prompt, text,
         "num_beams": num_beams,
         "repetition_penalty": float(repetition_penalty),
         "max_mel_tokens": int(max_mel_tokens),
-        # "typical_sampling": bool(typical_sampling),
-        # "typical_mass": float(typical_mass),
     }
     if type(emo_control_method) is not int:
         emo_control_method = emo_control_method.value
@@ -228,9 +226,11 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                     top_k = gr.Slider(label="top_k", minimum=0, maximum=100, value=30, step=1)
                     num_beams = gr.Slider(label="num_beams", value=3, minimum=1, maximum=10, step=1)
                 with gr.Row():
-                    repetition_penalty = gr.Number(label="repetition_penalty", precision=None, value=10.0, minimum=0.1, maximum=20.0, step=0.1)
+                    repetition_penalty = gr.Number(label="repetition_penalty", precision=None, value=1.1, minimum=0.1, maximum=20.0, step=0.1)
+                with gr.Row():
+                    duration = gr.Slider(label="Target Duration (s)", minimum=0, maximum=60, value=0, step=0.1, info="Force specific duration (0 for auto)")
                     length_penalty = gr.Number(label="length_penalty", precision=None, value=0.0, minimum=-2.0, maximum=2.0, step=0.1)
-                max_mel_tokens = gr.Slider(label="max_mel_tokens", value=1500, minimum=50, maximum=tts.cfg.gpt.max_mel_tokens, step=10, info="Maximum generated mel tokens")
+                max_mel_tokens = gr.Slider(label="max_mel_tokens", value=tts.cfg.gpt.max_mel_tokens, minimum=50, maximum=tts.cfg.gpt.max_mel_tokens, step=10, info="Maximum generated mel tokens")
             with gr.Column(scale=2):
                 gr.Markdown("**Sentence Settings** _Controls sentence splitting._")
                 with gr.Row():
@@ -250,6 +250,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                         wrap=True,
                     )
         advanced_params = [
+            duration,
             do_sample, top_p, top_k, temperature,
             length_penalty, num_beams, repetition_penalty, max_mel_tokens,
         ]
@@ -274,7 +275,8 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                             emo_upload,
                             emo_weight,
                             emo_text,
-                            vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
+                            vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+                            duration]
                 )
 
         with gr.Tab("Batch Generation"):
@@ -617,7 +619,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
     def generate_all_batch(rows, selected_value, emo_control_method, emo_ref_path, emo_weight,
                            vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
                            emo_text, emo_random, max_text_tokens_per_sentence,
-                           do_sample, top_p, top_k, temperature,
+                           duration, do_sample, top_p, top_k, temperature,
                            length_penalty, num_beams, repetition_penalty, max_mel_tokens,
                            progress=gr.Progress()):
         rows = rows or []
@@ -643,6 +645,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
 
         generation_kwargs = build_generation_kwargs(do_sample, top_p, top_k, temperature,
                                                     length_penalty, num_beams, repetition_penalty, max_mel_tokens)
+        generation_kwargs["duration_seconds"] = float(duration) if float(duration) > 0 else None
 
         outputs_dir = os.path.abspath(os.path.join(current_dir, "outputs", "tasks"))
         os.makedirs(outputs_dir, exist_ok=True)
@@ -699,7 +702,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
     def regenerate_batch_entry(rows, selected_value, emo_control_method, emo_ref_path, emo_weight,
                                vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
                                emo_text, emo_random, max_text_tokens_per_sentence,
-                               do_sample, top_p, top_k, temperature,
+                               duration, do_sample, top_p, top_k, temperature,
                                length_penalty, num_beams, repetition_penalty, max_mel_tokens,
                                progress=gr.Progress()):
         rows = rows or []
@@ -724,6 +727,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
 
         generation_kwargs = build_generation_kwargs(do_sample, top_p, top_k, temperature,
                                                     length_penalty, num_beams, repetition_penalty, max_mel_tokens)
+        generation_kwargs["duration_seconds"] = float(duration) if float(duration) > 0 else None
 
         prompt_path = selected_row.get("prompt_path")
         if not prompt_path or not os.path.exists(prompt_path):

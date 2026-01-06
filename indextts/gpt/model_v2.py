@@ -796,11 +796,11 @@ class UnifiedVoice(nn.Module):
                 inputs,  # fake input_ids (all 1s + start_mel_token)
                 max_new_tokens=max_length - trunc_index,
                 attention_mask=attention_mask,
-                temperature=hf_generate_kwargs.get('temperature', 1),
                 stop_tokens=[self.stop_mel_token],
                 tts_embeddings=inputs_embeds,  # [pad][cond][text] embeddings (87 tokens, NO start_mel_token)
                 tts_mel_embedding=self.inference_model.embeddings,  # mel_embedding layer
                 tts_text_pos_embedding=self.inference_model.text_pos_embedding,  # text_pos_embedding layer
+                **hf_generate_kwargs,
             )
         else:
             output = self.inference_model.generate(inputs, 

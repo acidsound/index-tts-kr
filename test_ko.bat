@@ -1,7 +1,7 @@
 uv run python inference_script.py ^
     --config checkpoints/config_finetune.yaml ^
-    --gpt-checkpoint trained_ckpts_ko/model_step5220.pth ^
-    --speaker "examples/06.wav" ^
+    --gpt-checkpoint trained_ckpts_ko/model_step5584.pth ^
+    --speaker "examples/voice_01.wav" ^
     --text-file "test_text.txt" ^
     --output "outputs/test_result_ko.wav" ^
     --device cuda:0

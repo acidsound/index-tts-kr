@@ -396,6 +396,7 @@ class AccelInferenceEngine:
         tts_text_pos_embedding: Optional[
             torch.nn.Module
         ] = None,  # TTS: text_pos_embedding layer
+        **kwargs,
     ) -> torch.Tensor:
         """
         Generate tokens.
@@ -411,6 +412,10 @@ class AccelInferenceEngine:
         Returns:
             Generated token IDs [batch_size, total_len]
         """
+        repetition_penalty = getattr(self, "repetition_penalty_val", 1.0)
+        # Use repetition_penalty from kwargs if provided
+        repetition_penalty = kwargs.get("repetition_penalty", repetition_penalty)
+
         batch_size = input_ids.size(0)
         device = input_ids.device
 
@@ -506,6 +511,30 @@ class AccelInferenceEngine:
         else:
             logits = self.model.compute_logits(last_hidden)  # [batch_size, vocab_size]
 
+        # Apply repetition penalty
+        if repetition_penalty != 1.0:
+            for i in range(batch_size):
+                for token_id in set(sequences[i].token_ids):
+                    if logits[i, token_id] < 0:
+                        logits[i, token_id] *= repetition_penalty
+                    else:
+                        logits[i, token_id] /= repetition_penalty
+
+        # Apply Top-K / Top-P
+        if top_k > 0 or top_p < 1.0:
+            for i in range(batch_size):
+                indices_to_remove = torch.zeros_like(logits[i], dtype=torch.bool)
+                if top_k > 0:
+                    indices_to_remove = logits[i] < torch.topk(logits[i], top_k)[0][..., -1, None]
+                if top_p < 1.0:
+                    sorted_logits, sorted_indices = torch.sort(logits[i], descending=True)
+                    cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = 0
+                    indices_to_remove |= sorted_indices_to_remove.scatter(0, sorted_indices, sorted_indices_to_remove)
+                logits[i][indices_to_remove] = -float("Inf")
+
         temperatures = self._prepare_sample(sequences, temperature)
         if temperature > 0:
             first_token = self.sampler(logits, temperatures)
@@ -568,6 +597,30 @@ class AccelInferenceEngine:
                 logits = self.model.compute_logits(
                     hidden_states
                 )  # [batch_size, vocab_size]
+
+            # Apply repetition penalty
+            if repetition_penalty != 1.0:
+                for i in range(batch_size):
+                    for token_id in set(sequences[i].token_ids):
+                        if logits[i, token_id] < 0:
+                            logits[i, token_id] *= repetition_penalty
+                        else:
+                            logits[i, token_id] /= repetition_penalty
+
+            # Apply Top-K / Top-P
+            if top_k > 0 or top_p < 1.0:
+                for i in range(batch_size):
+                    indices_to_remove = torch.zeros_like(logits[i], dtype=torch.bool)
+                    if top_k > 0:
+                        indices_to_remove = logits[i] < torch.topk(logits[i], top_k)[0][..., -1, None]
+                    if top_p < 1.0:
+                        sorted_logits, sorted_indices = torch.sort(logits[i], descending=True)
+                        cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+                        sorted_indices_to_remove = cumulative_probs > top_p
+                        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                        sorted_indices_to_remove[..., 0] = 0
+                        indices_to_remove |= sorted_indices_to_remove.scatter(0, sorted_indices, sorted_indices_to_remove)
+                    logits[i][indices_to_remove] = -float("Inf")
 
             reset_forward_context()
 

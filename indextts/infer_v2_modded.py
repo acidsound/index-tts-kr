@@ -46,7 +46,7 @@ class IndexTTS2:
         for key in ("text_embedding.weight", "text_head.weight", "text_head.bias"):
             tensor = state_dict.get(key)
             if tensor is not None:
-                return tensor.shape[0]
+                return tensor.shape[0] - 1
         return None
 
     @staticmethod
@@ -82,7 +82,13 @@ class IndexTTS2:
             new_key = key.replace(".base_layer.", ".")
             filtered_state[new_key] = value
 
-        resizable_keys = ("text_embedding.weight", "text_head.weight", "text_head.bias")
+        resizable_keys = (
+            "text_embedding.weight", 
+            "text_head.weight", 
+            "text_head.bias",
+            "mel_pos_embedding.emb.weight",
+            "text_pos_embedding.emb.weight"
+        )
         resizable: dict[str, torch.Tensor] = {}
         for key in resizable_keys:
             tensor = filtered_state.pop(key, None)
@@ -528,8 +534,8 @@ class IndexTTS2:
         autoregressive_batch_size = 1
         length_penalty = generation_kwargs.pop("length_penalty", 0.0)
         num_beams = generation_kwargs.pop("num_beams", 3)
-        repetition_penalty = generation_kwargs.pop("repetition_penalty", 10.0)
-        max_mel_tokens = generation_kwargs.pop("max_mel_tokens", 1500)
+        repetition_penalty = generation_kwargs.pop("repetition_penalty", 1.1)
+        max_mel_tokens = generation_kwargs.pop("max_mel_tokens", self.cfg.gpt.max_mel_tokens)
         sampling_rate = 22050
 
         wavs = []
